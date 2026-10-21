@@ -102,13 +102,13 @@ function tick() {
 async function wake(d, btn) {
   btn.disabled = true;
   const r = await fetch(`/api/wake/${d.id}`, { method: "POST", headers: { "X-Requested-With": "wol" } });
-  msg.textContent = r.ok ? `已向 ${d.name} 发送唤醒包，开机后状态约 1 分钟内更新，刷新页面可立即查看` : `发送失败：${r.status}`;
+  msg.textContent = r.ok ? `已向 ${d.name} 发送唤醒包，开机后状态会在约半分钟内更新` : `发送失败：${r.status}`;
   setTimeout(() => { btn.disabled = false; }, 3000);
 }
 
 load();
-setInterval(load, 60000);
-setInterval(tick, 60000);
+setInterval(load, 10000);
+setInterval(tick, 1000);
 </script>
 </body>
 </html>

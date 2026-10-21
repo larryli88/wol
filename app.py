@@ -377,7 +377,7 @@ def main() -> None:
 
     mon_cfg = cfg.get("monitor", {})
     monitor = Monitor(cfg["devices"], data_dir=os.environ.get("WOL_DATA_DIR", "data"),
-                      interval=float(mon_cfg.get("interval", 30)))
+                      interval=float(mon_cfg.get("interval", 15)))
     monitor.record("service_start")
     monitor.start()
 

@@ -3,7 +3,7 @@
 A tiny Wake-on-LAN web page for a home server, served through Cloudflare Tunnel and protected by Cloudflare Access.
 
 - `app.py`: Python stdlib HTTP server plus PyJWT. It lists devices with their online status (ICMP, with a TCP probe as fallback) and sends magic packets.
-- A background monitor polls devices every 30 s (`[monitor] interval`) and records when each one went up or down. That gives "on for 2h13m since 01:55". A change must show up in two polls in a row before it counts. The time is when the change was first seen, so it is accurate only to the poll interval, not the real boot time. `/logs` shows recent events: power on/off, wake requests (with the Access user), and service restarts.
+- A background monitor polls devices every 15 s (`[monitor] interval`) and records when each one went up or down. That gives "on for 2h13m since 01:55". A change must show up in two polls in a row before it counts. The time is when the change was first seen, so it is accurate only to the poll interval, not the real boot time. `/logs` shows recent events: power on/off, wake requests (with the Access user), and service restarts.
 - State and the event log (the last 500 events) persist in the `wol-data` volume.
 - Listens on `127.0.0.1:8099` only. cloudflared on the same host is the only way in.
 - Every request except `/healthz` must carry a valid `Cf-Access-Jwt-Assertion`, checked against the team's certs, the application AUD and the issuer. The service refuses to start if `[access]` is not configured.
