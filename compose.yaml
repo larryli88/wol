@@ -1,0 +1,14 @@
+services:
+  wol:
+    build: .
+    image: wol:local
+    container_name: wol
+    # Host networking is required: magic packets are LAN broadcasts, which
+    # don't leave a Docker bridge network. The app itself binds 127.0.0.1 only.
+    network_mode: host
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - ./config.toml:/app/config.toml:ro

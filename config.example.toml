@@ -1,0 +1,19 @@
+[server]
+# Only cloudflared on the same host should reach this. Do not bind 0.0.0.0.
+host = "127.0.0.1"
+port = 8099
+
+[access]
+# Your Zero Trust team domain, and the Access application's
+# "Application Audience (AUD) Tag" (shown on the application's overview page).
+team_domain = "https://<team-name>.cloudflareaccess.com"
+aud = "<application-aud-tag>"
+
+[[devices]]
+name = "Desktop"
+mac = "00:11:22:33:44:55"
+ip = "192.168.1.100"
+broadcast = "192.168.1.255"
+# Fallback when the PC's firewall drops ping: a TCP connect that is accepted
+# or refused also counts as online (445 = SMB, 3389 = RDP).
+probe_ports = [445, 3389]
