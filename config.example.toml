@@ -5,7 +5,7 @@ port = 8099
 
 [monitor]
 # Seconds between status checks.
-interval = 15
+interval = 30
 
 [access]
 # Your Zero Trust team domain, and the Access application's
