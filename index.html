@@ -6,10 +6,10 @@
 <title>Wake on LAN</title>
 <style>
   :root { --bg: #f6f7f9; --card: #fff; --fg: #1d2430; --muted: #6b7380; --line: #e3e6eb;
-          --accent: #2f6fde; --ok: #1f9d55; --off: #9aa1ab; }
+          --accent: #2f6fde; --ok: #1f9d55; --off: #9aa1ab; --danger: #c93b3b; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #14171c; --card: #1d2128; --fg: #e6e9ee; --muted: #9aa1ab; --line: #2c313a;
-            --accent: #5b8ff0; --ok: #3cc47c; --off: #6b7380; }
+            --accent: #5b8ff0; --ok: #3cc47c; --off: #6b7380; --danger: #e5675f; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
@@ -29,6 +29,8 @@
   button { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
            padding: 8px 16px; font: inherit; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
+  button.off { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .actions { display: flex; flex-direction: column; gap: 8px; }
   #msg { color: var(--muted); font-size: 14px; min-height: 1.5em; }
 </style>
 </head>
@@ -84,14 +86,21 @@ function card(d) {
   el.className = "card";
   el.innerHTML = `<span class="dot"></span>
     <div class="info"><div class="name"></div><div class="uptime"></div><div class="meta"></div></div>
-    <button>唤醒</button>`;
+    <div class="actions"><button class="on">唤醒</button><button class="off">关机</button></div>`;
   el.querySelector(".dot").classList.toggle("on", !!d.online);
   el.querySelector(".dot").title = d.online ? "在线" : "离线";
   el.querySelector(".name").textContent = d.name;
   el.querySelector(".uptime").textContent = uptimeText(d);
   el.querySelector(".meta").textContent = `${d.ip || "-"} · ${d.mac}`;
-  const btn = el.querySelector("button");
-  btn.onclick = () => wake(d, btn);
+  const wakeBtn = el.querySelector("button.on"), offBtn = el.querySelector("button.off");
+  wakeBtn.onclick = () => wake(d, wakeBtn);
+  if (d.can_shutdown) {
+    offBtn.disabled = !d.online;
+    offBtn.title = d.online ? "" : "电脑不在线";
+    offBtn.onclick = () => shutdown(d, offBtn);
+  } else {
+    offBtn.remove();
+  }
   return el;
 }
 
@@ -103,6 +112,15 @@ async function wake(d, btn) {
   btn.disabled = true;
   const r = await fetch(`/api/wake/${d.id}`, { method: "POST", headers: { "X-Requested-With": "wol" } });
   msg.textContent = r.ok ? `已向 ${d.name} 发送唤醒包，开机后状态会在约半分钟内更新` : `发送失败：${r.status}`;
+  setTimeout(() => { btn.disabled = false; }, 3000);
+}
+
+async function shutdown(d, btn) {
+  if (!confirm(`确定要关闭 ${d.name} 吗？\n未保存的工作可能会丢失。`)) return;
+  btn.disabled = true;
+  const r = await fetch(`/api/shutdown/${d.id}`, { method: "POST", headers: { "X-Requested-With": "wol" } });
+  const body = await r.json().catch(() => ({}));
+  msg.textContent = r.ok ? `已向 ${d.name} 发送关机指令` : `关机失败：${body.error || r.status}`;
   setTimeout(() => { btn.disabled = false; }, 3000);
 }
 

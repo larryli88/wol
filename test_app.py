@@ -263,12 +263,79 @@ class MonitorTest(unittest.TestCase):
         self.assertEqual(len(m.recent_events()), 1)
 
 
+class ShutdownTest(unittest.TestCase):
+    def setUp(self):
+        self.calls = []
+        self.result = (True, "")
+        self.orig = app.ssh_shutdown
+        app.ssh_shutdown = lambda d: (self.calls.append(d["id"]), self.result)[1]
+        devices = [
+            {"id": "pc", "name": "PC", "mac": MAC, "ip": "127.0.0.1", "broadcast": "127.0.0.1",
+             "port": 9, "shutdown": {"user": "u"}},
+            {"id": "nas", "name": "NAS", "mac": MAC, "ip": "127.0.0.1", "broadcast": "127.0.0.1", "port": 9},
+        ]
+        self.monitor = app.Monitor(devices, probe=lambda d: True)
+        self.server = app.make_server({"server": {"port": 0}, "devices": devices}, FakeVerifier(), self.monitor)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        app.ssh_shutdown = self.orig
+        self.server.shutdown()
+        self.server.server_close()
+
+    req = ServerTest.req
+    AUTH = {"Cf-Access-Jwt-Assertion": "good", "X-Requested-With": "wol"}
+
+    def test_shutdown_ok_is_logged(self):
+        self.assertEqual(self.req("/api/shutdown/pc", "POST", self.AUTH), (200, b'{"ok": true}'))
+        self.assertEqual(self.calls, ["pc"])
+        [ev] = self.monitor.recent_events()
+        self.assertEqual((ev["kind"], ev["device"], ev["user"], ev["ok"]), ("shutdown", "PC", "me@example.com", True))
+
+    def test_shutdown_failure_is_reported(self):
+        self.result = (False, "Connection refused")
+        code, body = self.req("/api/shutdown/pc", "POST", self.AUTH)
+        self.assertEqual((code, json.loads(body)["error"]), (502, "Connection refused"))
+        self.assertEqual(self.monitor.recent_events()[0]["error"], "Connection refused")
+
+    def test_shutdown_guards(self):
+        self.assertEqual(self.req("/api/shutdown/pc", "POST", {"X-Requested-With": "wol"})[0], 403)
+        self.assertEqual(self.req("/api/shutdown/pc", "POST", {"Cf-Access-Jwt-Assertion": "good"})[0], 400)
+        self.assertEqual(self.req("/api/shutdown/nas", "POST", self.AUTH)[0], 400)  # not configured
+        self.assertEqual(self.req("/api/shutdown/nope", "POST", self.AUTH)[0], 404)
+        self.assertEqual(self.calls, [])
+
+    def test_snapshot_flags(self):
+        self.assertEqual([d["can_shutdown"] for d in self.monitor.snapshot()], [True, False])
+
+    def test_ssh_command_is_strict(self):
+        app.ssh_shutdown = self.orig
+        dev = {"ip": "192.0.2.1", "shutdown": {"user": "u", "key": "/k", "known_hosts": "/kh",
+                                               "port": 22, "command": "shutdown /s /t 0"}}
+        seen = {}
+        orig_run = app.subprocess.run
+        app.subprocess.run = lambda cmd, **kw: seen.setdefault("cmd", cmd) and type(
+            "R", (), {"returncode": 0, "stderr": ""})()
+        try:
+            self.assertEqual(app.ssh_shutdown(dev), (True, ""))
+        finally:
+            app.subprocess.run = orig_run
+        cmd = " ".join(seen["cmd"])
+        for opt in ("BatchMode=yes", "StrictHostKeyChecking=yes", "UserKnownHostsFile=/kh", "IdentitiesOnly=yes"):
+            self.assertIn(opt, cmd)
+        self.assertEqual(seen["cmd"][-2:], ["u@192.0.2.1", "shutdown /s /t 0"])
+
+
 class ConfigTest(unittest.TestCase):
     def test_example_config(self):
         cfg = app.load_config("config.example.toml")
         d = cfg["devices"][0]
         self.assertEqual((d["id"], d["port"], d["broadcast"]), ("desktop", 9, "192.168.1.255"))
         self.assertEqual(cfg["server"]["host"], "127.0.0.1")
+        self.assertEqual(d["shutdown"], {"user": "your-windows-user", "key": "secrets/id_shutdown",
+                                         "known_hosts": "secrets/known_hosts", "port": 22,
+                                         "command": "shutdown /s /t 0"})
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
 __pycache__/
 # Real config holds private network details; only the example is committed.
 config.toml
+secrets/

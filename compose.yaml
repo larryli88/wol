@@ -1,6 +1,9 @@
 services:
   wol:
-    build: .
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
     image: wol:local
     container_name: wol
     # Host networking is required: magic packets are LAN broadcasts, which
@@ -12,6 +15,8 @@ services:
     security_opt: ["no-new-privileges:true"]
     volumes:
       - ./config.toml:/app/config.toml:ro
+      # SSH key + known_hosts for remote shutdown (never committed).
+      - ./secrets:/app/secrets:ro
       # Uptime state and event log. A named volume inherits /app/data's owner
       # (the non-root wol user) from the image, so it is writable.
       - wol-data:/app/data

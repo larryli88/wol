@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -42,6 +43,29 @@ def send_wol(mac: str, broadcast: str, port: int = 9, repeat: int = 3) -> None:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         for _ in range(repeat):
             s.sendto(packet, (broadcast, port))
+
+
+# --- Shutdown over SSH ----------------------------------------------------
+
+def ssh_shutdown(device: dict) -> tuple[bool, str]:
+    """Runs the shutdown command on the device over SSH.
+
+    The device's authorized_keys should pin this key to the same command with
+    command="..." so the key can't be used for anything else.
+    """
+    sd = device["shutdown"]
+    cmd = ["ssh", "-i", sd["key"], "-p", str(sd["port"]),
+           "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "ConnectTimeout=5",
+           "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={sd['known_hosts']}",
+           "-o", "LogLevel=ERROR",
+           f"{sd['user']}@{device['ip']}", sd["command"]]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)[:300]
+    if r.returncode != 0:
+        return False, (r.stderr.strip() or f"ssh exited with {r.returncode}")[:300]
+    return True, ""
 
 
 # --- Online status ---------------------------------------------------------
@@ -239,6 +263,7 @@ class Monitor:
     def snapshot(self):
         with self.lock:
             return [{"id": d["id"], "name": d["name"], "mac": d["mac"], "ip": d.get("ip"),
+                     "can_shutdown": "shutdown" in d,
                      **{k: self.state[d["id"]][k] for k in ("online", "since", "since_exact", "checked")}}
                     for d in self.devices]
 
@@ -272,6 +297,15 @@ def load_config(path: str) -> dict:
         d.setdefault("broadcast", "255.255.255.255")
         d.setdefault("port", 9)
         d["id"] = slugify(d["name"])
+        if "shutdown" in d:
+            sd = d["shutdown"]
+            if not sd.get("user") or not d.get("ip"):
+                raise ValueError(f"{d['name']}: shutdown needs user and the device ip")
+            secrets = Path(os.environ.get("WOL_SECRETS_DIR", "secrets"))
+            sd.setdefault("key", str(secrets / "id_shutdown"))
+            sd.setdefault("known_hosts", str(secrets / "known_hosts"))
+            sd.setdefault("port", 22)
+            sd.setdefault("command", "shutdown /s /t 0")
         if d["id"] in seen:
             raise ValueError(f"duplicate device name: {d['name']!r}")
         seen.add(d["id"])
@@ -343,14 +377,21 @@ class Handler(BaseHTTPRequestHandler):
         # Cross-site forms can't set custom headers, so this blocks CSRF.
         if self.headers.get("X-Requested-With") != "wol":
             return self._json(400, {"error": "missing X-Requested-With header"})
-        m = re.fullmatch(r"/api/wake/([a-z0-9-]+)", self.path)
-        device = next((d for d in self.devices if m and d["id"] == m.group(1)), None)
+        m = re.fullmatch(r"/api/(wake|shutdown)/([a-z0-9-]+)", self.path)
+        device = next((d for d in self.devices if m and d["id"] == m.group(2)), None)
         if device is None:
             return self._json(404, {"error": "unknown device"})
-        send_wol(device["mac"], device["broadcast"], device["port"])
-        log.info("wake %s (%s) requested by %s", device["name"], device["mac"], user)
-        self.monitor.record("wake", device, user)
-        self._json(200, {"ok": True})
+        if m.group(1) == "wake":
+            send_wol(device["mac"], device["broadcast"], device["port"])
+            log.info("wake %s (%s) requested by %s", device["name"], device["mac"], user)
+            self.monitor.record("wake", device, user)
+            return self._json(200, {"ok": True})
+        if "shutdown" not in device:
+            return self._json(400, {"error": "shutdown is not configured for this device"})
+        ok, err = ssh_shutdown(device)
+        log.info("shutdown %s requested by %s: %s", device["name"], user, "ok" if ok else err)
+        self.monitor.record("shutdown", device, user, ok=ok, **({"error": err} if err else {}))
+        self._json(200 if ok else 502, {"ok": ok, **({"error": err} if err else {})})
 
 
 def make_server(cfg: dict, verifier: AccessVerifier | None, monitor: Monitor) -> ThreadingHTTPServer:

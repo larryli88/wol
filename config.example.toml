@@ -21,3 +21,11 @@ broadcast = "192.168.1.255"
 # Fallback when the PC's firewall drops ping: a TCP connect that is accepted
 # or refused also counts as online (445 = SMB, 3389 = RDP).
 probe_ports = [445, 3389]
+
+# Optional: remote shutdown over SSH (adds a 关机 button). Put the private key
+# in secrets/id_shutdown and the device's host key in secrets/known_hosts.
+# On the device, pin the key to the command in authorized_keys:
+#   restrict,command="shutdown /s /t 0" ssh-ed25519 AAAA...
+[devices.shutdown]
+user = "your-windows-user"
+# command = "shutdown /s /t 0"

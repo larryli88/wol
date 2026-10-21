@@ -6,10 +6,10 @@
 <title>WoL Logs</title>
 <style>
   :root { --bg: #f6f7f9; --card: #fff; --fg: #1d2430; --muted: #6b7380; --line: #e3e6eb;
-          --accent: #2f6fde; --ok: #1f9d55; --off: #9aa1ab; --wake: #c27c0e; }
+          --accent: #2f6fde; --ok: #1f9d55; --off: #9aa1ab; --wake: #c27c0e; --danger: #c93b3b; }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #14171c; --card: #1d2128; --fg: #e6e9ee; --muted: #9aa1ab; --line: #2c313a;
-            --accent: #5b8ff0; --ok: #3cc47c; --off: #6b7380; --wake: #e0a33a; }
+            --accent: #5b8ff0; --ok: #3cc47c; --off: #6b7380; --wake: #e0a33a; --danger: #e5675f; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
@@ -31,6 +31,7 @@
   .online .tag { background: var(--ok); }
   .offline .tag { background: var(--off); }
   .wake .tag { background: var(--wake); }
+  .shutdown .tag { background: var(--danger); }
   #msg { color: var(--muted); font-size: 14px; margin-top: 12px; }
 </style>
 </head>
@@ -45,6 +46,8 @@ const LABELS = {
   online: e => [`${e.device} 开机`, e.note ? "在服务未运行期间开机，时间不精确" : ""],
   offline: e => [`${e.device} 关机`, e.note ? "在服务未运行期间关机，时间不精确" : ""],
   wake: e => [`发送唤醒包 → ${e.device}`, e.user ? `操作人：${e.user}` : ""],
+  shutdown: e => [`关机指令 → ${e.device}${e.ok ? "" : "（失败）"}`,
+                  [e.user && `操作人：${e.user}`, e.error].filter(Boolean).join(" · ")],
   service_start: () => ["WoL 服务启动", ""],
 };
 
