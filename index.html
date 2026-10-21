@@ -15,13 +15,16 @@
   body { margin: 0; background: var(--bg); color: var(--fg);
          font: 16px/1.5 system-ui, -apple-system, "PingFang SC", "Noto Sans SC", sans-serif; }
   main { max-width: 560px; margin: 0 auto; padding: 32px 16px; }
-  h1 { font-size: 20px; margin: 0 0 20px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; }
+  nav a { color: var(--accent); text-decoration: none; font-size: 14px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
           padding: 16px; display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--off); flex: none; }
   .dot.on { background: var(--ok); }
   .info { flex: 1; min-width: 0; }
   .name { font-weight: 600; }
+  .uptime { font-size: 14px; }
   .meta { color: var(--muted); font-size: 13px; font-family: ui-monospace, monospace; }
   button { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
            padding: 8px 16px; font: inherit; cursor: pointer; }
@@ -31,18 +34,47 @@
 </head>
 <body>
 <main>
-  <h1>Wake on LAN</h1>
+  <header><h1>Wake on LAN</h1><nav><a href="/logs">日志 →</a></nav></header>
   <div id="list"></div>
   <div id="msg">加载中…</div>
 </main>
 <script>
 const list = document.getElementById("list");
 const msg = document.getElementById("msg");
+let devices = [], skew = 0;  // server clock minus browser clock, in seconds
+
+function dur(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const d = Math.floor(sec / 86400), h = Math.floor(sec % 86400 / 3600), m = Math.floor(sec % 3600 / 60);
+  if (d) return `${d}天${h}小时`;
+  if (h) return `${h}小时${m}分`;
+  if (m) return `${m}分钟`;
+  return "不到1分钟";
+}
+
+function when(ts) {
+  const t = new Date(ts * 1000), now = new Date();
+  const hm = t.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  if (t.toDateString() === now.toDateString()) return `今天 ${hm}`;
+  return `${t.getMonth() + 1}月${t.getDate()}日 ${hm}`;
+}
+
+function uptimeText(d) {
+  if (d.online === null) return "正在检测…";
+  const state = d.online ? "已开机" : "已关机";
+  const event = d.online ? "开机" : "关机";
+  const elapsed = dur(Date.now() / 1000 + skew - d.since);
+  // Inexact: the change happened before we started watching, so we only know a lower bound.
+  if (!d.since_exact) return `${state} 至少${elapsed} · 自 ${when(d.since)} 起`;
+  return `${state} ${elapsed} · ${when(d.since)} ${event}`;
+}
 
 async function load() {
   const r = await fetch("/api/devices");
   if (!r.ok) { msg.textContent = "加载失败：" + r.status; return; }
-  const devices = await r.json();
+  const data = await r.json();
+  skew = data.now - Date.now() / 1000;
+  devices = data.devices;
   list.replaceChildren(...devices.map(card));
   msg.textContent = devices.length ? "" : "还没有配置设备";
 }
@@ -51,26 +83,32 @@ function card(d) {
   const el = document.createElement("div");
   el.className = "card";
   el.innerHTML = `<span class="dot"></span>
-    <div class="info"><div class="name"></div><div class="meta"></div></div>
+    <div class="info"><div class="name"></div><div class="uptime"></div><div class="meta"></div></div>
     <button>唤醒</button>`;
-  el.querySelector(".dot").classList.toggle("on", d.online);
+  el.querySelector(".dot").classList.toggle("on", !!d.online);
   el.querySelector(".dot").title = d.online ? "在线" : "离线";
   el.querySelector(".name").textContent = d.name;
+  el.querySelector(".uptime").textContent = uptimeText(d);
   el.querySelector(".meta").textContent = `${d.ip || "-"} · ${d.mac}`;
   const btn = el.querySelector("button");
   btn.onclick = () => wake(d, btn);
   return el;
 }
 
+function tick() {
+  list.querySelectorAll(".uptime").forEach((el, i) => { el.textContent = uptimeText(devices[i]); });
+}
+
 async function wake(d, btn) {
   btn.disabled = true;
   const r = await fetch(`/api/wake/${d.id}`, { method: "POST", headers: { "X-Requested-With": "wol" } });
-  msg.textContent = r.ok ? `已向 ${d.name} 发送唤醒包` : `发送失败：${r.status}`;
+  msg.textContent = r.ok ? `已向 ${d.name} 发送唤醒包，开机后状态会在约半分钟内更新` : `发送失败：${r.status}`;
   setTimeout(() => { btn.disabled = false; }, 3000);
 }
 
 load();
 setInterval(load, 10000);
+setInterval(tick, 1000);
 </script>
 </body>
 </html>

@@ -1,4 +1,6 @@
 import json
+import pathlib
+import tempfile
 import socket
 import threading
 import time
@@ -105,7 +107,9 @@ class ServerTest(unittest.TestCase):
             "devices": [{"name": "Desktop", "mac": MAC, "ip": "127.0.0.1",
                          "broadcast": "127.0.0.1", "port": self.udp.getsockname()[1], "id": "desktop"}],
         }
-        self.server = app.make_server(cfg, FakeVerifier())
+        self.monitor = app.Monitor(cfg["devices"], probe=lambda d: True)
+        self.monitor.poll_once()
+        self.server = app.make_server(cfg, FakeVerifier(), self.monitor)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
@@ -138,8 +142,14 @@ class ServerTest(unittest.TestCase):
         self.assertIn(b"Wake on LAN", body)
         code, body = self.req("/api/devices", headers=auth)
         self.assertEqual(code, 200)
-        self.assertEqual(json.loads(body), [
-            {"id": "desktop", "name": "Desktop", "mac": MAC, "ip": "127.0.0.1", "online": True}])
+        [d] = json.loads(body)["devices"]
+        self.assertEqual({k: d[k] for k in ("id", "name", "mac", "ip", "online", "since_exact")},
+                         {"id": "desktop", "name": "Desktop", "mac": MAC, "ip": "127.0.0.1",
+                          "online": True, "since_exact": False})
+        code, body = self.req("/logs", headers=auth)
+        self.assertEqual(code, 200)
+        self.assertIn("最近日志".encode(), body)
+        self.assertEqual(self.req("/api/logs")[0], 403)
 
     def test_wake_sends_magic_packets(self):
         code, _ = self.req("/api/wake/desktop", "POST",
@@ -147,6 +157,9 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(code, 200)
         for _ in range(3):
             self.assertEqual(self.udp.recv(200), app.magic_packet(MAC))
+        code, body = self.req("/api/logs", headers={"Cf-Access-Jwt-Assertion": "good"})
+        [ev] = json.loads(body)["events"]
+        self.assertEqual((ev["kind"], ev["device"], ev["user"]), ("wake", "Desktop", "me@example.com"))
 
     def test_wake_rejections(self):
         self.assertEqual(self.req("/api/wake/desktop", "POST", {"X-Requested-With": "wol"})[0], 403)
@@ -157,6 +170,97 @@ class ServerTest(unittest.TestCase):
         self.udp.settimeout(0.3)
         with self.assertRaises(socket.timeout):
             self.udp.recv(200)
+
+
+class MonitorTest(unittest.TestCase):
+    DEV = {"id": "desktop", "name": "Desktop", "mac": MAC}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.now = 1000.0
+        self.up = False
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def monitor(self, **kw):
+        return app.Monitor([self.DEV], data_dir=self.tmp.name, probe=lambda d: self.up,
+                           clock=lambda: self.now, **kw)
+
+    def poll(self, m, up, at):
+        self.up, self.now = up, at
+        m.poll_once()
+
+    def state(self, m):
+        return {k: m.snapshot()[0][k] for k in ("online", "since", "since_exact")}
+
+    def kinds(self, m):
+        return [(e["kind"], e["ts"]) for e in m.recent_events()][::-1]
+
+    def test_first_reading_is_not_exact(self):
+        m = self.monitor()
+        self.assertEqual(self.state(m)["online"], None)
+        self.poll(m, False, 1000)
+        self.assertEqual(self.state(m), {"online": False, "since": 1000, "since_exact": False})
+        self.assertEqual(self.kinds(m), [])
+
+    def test_change_needs_confirmation_and_uses_first_seen_time(self):
+        m = self.monitor(confirm=2)
+        self.poll(m, False, 1000)
+        self.poll(m, True, 1015)   # first sighting
+        self.assertFalse(self.state(m)["online"])
+        self.poll(m, True, 1030)   # confirmed
+        self.assertEqual(self.state(m), {"online": True, "since": 1015, "since_exact": True})
+        self.assertEqual(self.kinds(m), [("online", 1030)])
+
+    def test_single_blip_is_ignored(self):
+        m = self.monitor(confirm=2)
+        self.poll(m, True, 1000)
+        self.poll(m, True, 1015)
+        self.poll(m, False, 1030)  # one lost ping
+        self.poll(m, True, 1045)
+        self.poll(m, False, 1060)  # a new, separate miss starts counting again
+        self.assertEqual(self.state(m)["online"], True)
+        self.assertEqual(self.kinds(m), [])
+
+    def test_state_survives_restart(self):
+        m = self.monitor()
+        self.poll(m, False, 1000)
+        self.poll(m, True, 1015)
+        self.poll(m, True, 1030)
+        m.record("wake", self.DEV, "me@example.com")
+        m2 = self.monitor()
+        self.assertEqual([e["kind"] for e in m2.recent_events()], ["wake", "online"])
+        self.poll(m2, True, 5000)  # still up after restart: keep the original exact time
+        self.assertEqual(self.state(m2), {"online": True, "since": 1015, "since_exact": True})
+        self.assertEqual(len(m2.recent_events()), 2)
+
+    def test_change_while_down_is_logged_as_inexact(self):
+        m = self.monitor()
+        self.poll(m, True, 1000)
+        m2 = self.monitor()
+        self.poll(m2, False, 9000)
+        self.assertEqual(self.state(m2), {"online": False, "since": 9000, "since_exact": False})
+        [ev] = m2.recent_events()
+        self.assertEqual(ev["kind"], "offline")
+        self.assertIn("note", ev)
+
+    def test_event_log_is_bounded_and_compacted(self):
+        m = self.monitor(max_events=10)
+        for i in range(200):
+            self.now = i
+            m.record("wake", self.DEV, "x" * 50)
+        self.assertEqual(len(m.recent_events()), 10)
+        self.assertEqual(m.recent_events()[0]["ts"], 199)
+        lines = pathlib.Path(self.tmp.name, "events.jsonl").read_text().splitlines()
+        self.assertLess(len(lines), 200)
+        self.assertEqual(len(self.monitor(max_events=10).recent_events()), 10)
+
+    def test_unwritable_data_dir_degrades_gracefully(self):
+        m = app.Monitor([self.DEV], data_dir="/proc/nope", probe=lambda d: True)
+        m.poll_once()
+        m.record("wake", self.DEV)
+        self.assertEqual(len(m.recent_events()), 1)
 
 
 class ConfigTest(unittest.TestCase):

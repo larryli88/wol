@@ -12,3 +12,9 @@ services:
     security_opt: ["no-new-privileges:true"]
     volumes:
       - ./config.toml:/app/config.toml:ro
+      # Uptime state and event log. A named volume inherits /app/data's owner
+      # (the non-root wol user) from the image, so it is writable.
+      - wol-data:/app/data
+
+volumes:
+  wol-data:

@@ -11,8 +11,10 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 import tomllib
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +24,8 @@ import jwt
 log = logging.getLogger("wol")
 
 MAC_RE = re.compile(r"^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$", re.I)
-INDEX_HTML = (Path(__file__).parent / "index.html").read_bytes()
+STATIC = Path(__file__).parent
+PAGES = {"/": "index.html", "/logs": "logs.html"}
 
 
 # --- Wake-on-LAN -----------------------------------------------------------
@@ -88,6 +91,158 @@ def is_online(device: dict) -> bool:
     return any(tcp_probe(ip, p) for p in device.get("probe_ports", []))
 
 
+# --- Monitor: uptime/downtime tracking and event log -----------------------
+
+class Monitor:
+    """Polls devices in the background and records state changes.
+
+    The time a device "came online" is when we first saw it up, so it is only
+    as precise as the poll interval. A change must be seen `confirm` polls in
+    a row before it counts, so one lost ping doesn't log a fake shutdown.
+    """
+
+    def __init__(self, devices, data_dir=None, interval=15.0, confirm=2,
+                 max_events=500, probe=is_online, clock=time.time):
+        self.devices = devices
+        self.interval = interval
+        self.confirm = confirm
+        self.probe = probe
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.events = deque(maxlen=max_events)
+        self.state = {d["id"]: {"online": None, "since": None, "since_exact": False,
+                                "checked": None, "pending": None, "pending_at": None,
+                                "pending_count": 0} for d in devices}
+        self.data_dir = Path(data_dir) if data_dir else None
+        if self.data_dir:
+            try:
+                self.data_dir.mkdir(exist_ok=True)
+            except OSError as e:
+                log.warning("data dir unavailable, history will not persist: %s", e)
+                self.data_dir = None
+        self._stored = {}
+        self._load()
+
+    # persistence
+
+    def _load(self):
+        if not self.data_dir:
+            return
+        try:
+            self._stored = json.loads((self.data_dir / "state.json").read_text())
+        except (OSError, ValueError):
+            self._stored = {}
+        try:
+            with open(self.data_dir / "events.jsonl") as f:
+                for line in f:
+                    try:
+                        self.events.append(json.loads(line))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+
+    def _save_state(self):
+        if not self.data_dir:
+            return
+        keep = {k: {f: v[f] for f in ("online", "since", "since_exact")}
+                for k, v in self.state.items() if v["online"] is not None}
+        try:
+            tmp = self.data_dir / "state.json.tmp"
+            tmp.write_text(json.dumps(keep))
+            tmp.replace(self.data_dir / "state.json")
+        except OSError as e:
+            log.warning("could not save state: %s", e)
+
+    def _append_event(self, ev):
+        if not self.data_dir:
+            return
+        path = self.data_dir / "events.jsonl"
+        try:
+            with open(path, "a") as f:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            # Compact once the file is well past what we keep in memory.
+            if path.stat().st_size > 400 * self.events.maxlen:
+                tmp = self.data_dir / "events.jsonl.tmp"
+                tmp.write_text("".join(json.dumps(e, ensure_ascii=False) + "\n" for e in self.events))
+                tmp.replace(path)
+        except OSError as e:
+            log.warning("could not save event: %s", e)
+
+    # events
+
+    def record(self, kind, device=None, user=None, **extra):
+        ev = {"ts": self.clock(), "kind": kind, **extra}
+        if device:
+            ev["device"] = device["name"]
+        if user:
+            ev["user"] = user
+        with self.lock:
+            self.events.append(ev)
+            self._append_event(ev)
+
+    def recent_events(self, limit=200):
+        with self.lock:
+            return list(self.events)[-limit:][::-1]
+
+    # polling
+
+    def observe(self, device, online: bool, now: float):
+        st = self.state[device["id"]]
+        changed = None
+        with self.lock:
+            st["checked"] = now
+            if st["online"] is None:
+                # First reading since start: continue the stored record if it
+                # still matches; otherwise the change happened while we were down.
+                stored = self._stored.get(device["id"])
+                if stored and stored["online"] == online:
+                    st.update(online=online, since=stored["since"], since_exact=stored["since_exact"])
+                else:
+                    st.update(online=online, since=now, since_exact=False)
+                    if stored:
+                        changed = (online, "while the service was not running")
+                self._save_state()
+            elif online == st["online"]:
+                st.update(pending=None, pending_at=None, pending_count=0)
+            else:
+                if st["pending"] != online:
+                    st.update(pending=online, pending_at=now, pending_count=0)
+                st["pending_count"] += 1
+                if st["pending_count"] >= self.confirm:
+                    st.update(online=online, since=st["pending_at"], since_exact=True,
+                              pending=None, pending_at=None, pending_count=0)
+                    changed = (online, None)
+                    self._save_state()
+        if changed:
+            self.record("online" if changed[0] else "offline", device,
+                        **({"note": changed[1]} if changed[1] else {}))
+
+    def poll_once(self):
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(self.probe, self.devices))
+        now = self.clock()
+        for d, online in zip(self.devices, results):
+            self.observe(d, online, now)
+
+    def run(self):
+        while True:
+            try:
+                self.poll_once()
+            except Exception:
+                log.exception("poll failed")
+            time.sleep(self.interval)
+
+    def start(self):
+        threading.Thread(target=self.run, name="monitor", daemon=True).start()
+
+    def snapshot(self):
+        with self.lock:
+            return [{"id": d["id"], "name": d["name"], "mac": d["mac"], "ip": d.get("ip"),
+                     **{k: self.state[d["id"]][k] for k in ("online", "since", "since_exact", "checked")}}
+                    for d in self.devices]
+
+
 # --- Cloudflare Access -----------------------------------------------------
 
 class AccessVerifier:
@@ -133,6 +288,7 @@ class Handler(BaseHTTPRequestHandler):
     # Set by make_server().
     devices: list[dict] = []
     verifier: AccessVerifier | None = None
+    monitor: Monitor | None = None
 
     def log_message(self, fmt, *args):
         log.info("%s %s", self.address_string(), fmt % args)
@@ -149,7 +305,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _json(self, code: int, obj) -> None:
-        self._send(code, json.dumps(obj).encode(), "application/json")
+        self._send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json")
 
     def _authorize(self) -> str | None:
         """Returns the user's email (or 'anonymous'), or None after sending 403."""
@@ -172,15 +328,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, b"ok", "text/plain")
         if self._authorize() is None:
             return
-        if self.path == "/":
-            return self._send(200, INDEX_HTML, "text/html; charset=utf-8")
+        if self.path in PAGES:
+            return self._send(200, (STATIC / PAGES[self.path]).read_bytes(), "text/html; charset=utf-8")
         if self.path == "/api/devices":
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                online = list(pool.map(is_online, self.devices))
-            return self._json(200, [
-                {"id": d["id"], "name": d["name"], "mac": d["mac"], "ip": d.get("ip"), "online": o}
-                for d, o in zip(self.devices, online)
-            ])
+            return self._json(200, {"now": time.time(), "devices": self.monitor.snapshot()})
+        if self.path == "/api/logs":
+            return self._json(200, {"now": time.time(), "events": self.monitor.recent_events()})
         self._json(404, {"error": "not found"})
 
     def do_POST(self):
@@ -196,12 +349,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"error": "unknown device"})
         send_wol(device["mac"], device["broadcast"], device["port"])
         log.info("wake %s (%s) requested by %s", device["name"], device["mac"], user)
+        self.monitor.record("wake", device, user)
         self._json(200, {"ok": True})
 
 
-def make_server(cfg: dict, verifier: AccessVerifier | None) -> ThreadingHTTPServer:
+def make_server(cfg: dict, verifier: AccessVerifier | None, monitor: Monitor) -> ThreadingHTTPServer:
     server_cfg = cfg.get("server", {})
-    handler = type("BoundHandler", (Handler,), {"devices": cfg["devices"], "verifier": verifier})
+    handler = type("BoundHandler", (Handler,),
+                   {"devices": cfg["devices"], "verifier": verifier, "monitor": monitor})
     return ThreadingHTTPServer(
         (server_cfg.get("host", "127.0.0.1"), int(server_cfg.get("port", 8099))), handler
     )
@@ -220,7 +375,13 @@ def main() -> None:
     else:
         sys.exit("config: [access] team_domain and aud are required (refusing to start without auth)")
 
-    server = make_server(cfg, verifier)
+    mon_cfg = cfg.get("monitor", {})
+    monitor = Monitor(cfg["devices"], data_dir=os.environ.get("WOL_DATA_DIR", "data"),
+                      interval=float(mon_cfg.get("interval", 15)))
+    monitor.record("service_start")
+    monitor.start()
+
+    server = make_server(cfg, verifier, monitor)
     log.info("listening on %s:%s with %d device(s)", *server.server_address, len(cfg["devices"]))
     server.serve_forever()
 

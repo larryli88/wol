@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WoL Logs</title>
+<style>
+  :root { --bg: #f6f7f9; --card: #fff; --fg: #1d2430; --muted: #6b7380; --line: #e3e6eb;
+          --accent: #2f6fde; --ok: #1f9d55; --off: #9aa1ab; --wake: #c27c0e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14171c; --card: #1d2128; --fg: #e6e9ee; --muted: #9aa1ab; --line: #2c313a;
+            --accent: #5b8ff0; --ok: #3cc47c; --off: #6b7380; --wake: #e0a33a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 16px/1.5 system-ui, -apple-system, "PingFang SC", "Noto Sans SC", sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 32px 16px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 20px; margin: 0; }
+  nav a { color: var(--accent); text-decoration: none; font-size: 14px; }
+  ol { list-style: none; margin: 0; padding: 0; background: var(--card);
+       border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  li { display: flex; gap: 12px; padding: 10px 16px; border-top: 1px solid var(--line); }
+  li:first-child { border-top: 0; }
+  .time { color: var(--muted); font-size: 13px; font-family: ui-monospace, monospace;
+          white-space: nowrap; padding-top: 2px; }
+  .text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .tag { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+         background: var(--muted); vertical-align: middle; }
+  .online .tag { background: var(--ok); }
+  .offline .tag { background: var(--off); }
+  .wake .tag { background: var(--wake); }
+  #msg { color: var(--muted); font-size: 14px; margin-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>最近日志</h1><nav><a href="/">← 返回</a></nav></header>
+  <ol id="list"></ol>
+  <div id="msg">加载中…</div>
+</main>
+<script>
+const LABELS = {
+  online: e => [`${e.device} 开机`, e.note ? "在服务未运行期间开机，时间不精确" : ""],
+  offline: e => [`${e.device} 关机`, e.note ? "在服务未运行期间关机，时间不精确" : ""],
+  wake: e => [`发送唤醒包 → ${e.device}`, e.user ? `操作人：${e.user}` : ""],
+  service_start: () => ["WoL 服务启动", ""],
+};
+
+function stamp(ts) {
+  const t = new Date(ts * 1000), p = n => String(n).padStart(2, "0");
+  return `${p(t.getMonth() + 1)}-${p(t.getDate())} ${p(t.getHours())}:${p(t.getMinutes())}:${p(t.getSeconds())}`;
+}
+
+async function load() {
+  const r = await fetch("/api/logs");
+  const msg = document.getElementById("msg");
+  if (!r.ok) { msg.textContent = "加载失败：" + r.status; return; }
+  const { events } = await r.json();
+  document.getElementById("list").replaceChildren(...events.map(e => {
+    const li = document.createElement("li");
+    li.className = e.kind;
+    const [title, sub] = (LABELS[e.kind] || (() => [e.kind, ""]))(e);
+    li.innerHTML = `<span class="time"></span><div class="text"><span class="tag"></span><span class="title"></span><div class="sub"></div></div>`;
+    li.querySelector(".time").textContent = stamp(e.ts);
+    li.querySelector(".title").textContent = title;
+    li.querySelector(".sub").textContent = sub;
+    if (!sub) li.querySelector(".sub").remove();
+    return li;
+  }));
+  msg.textContent = events.length ? `显示最近 ${events.length} 条` : "还没有日志";
+}
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>
