@@ -45,7 +45,8 @@
 const LABELS = {
   online: e => [`${e.device} 开机`, e.note ? "在服务未运行期间开机，时间不精确" : ""],
   offline: e => [`${e.device} 关机`, e.note ? "在服务未运行期间关机，时间不精确" : ""],
-  wake: e => [`发送唤醒包 → ${e.device}`, e.user ? `操作人：${e.user}` : ""],
+  wake: e => [e.ok === undefined ? `发送唤醒包 → ${e.device}` : `开机指令 → ${e.device}${e.ok ? "" : "（失败）"}`,
+              [e.user && `操作人：${e.user}`, e.error].filter(Boolean).join(" · ")],
   shutdown: e => [`关机指令 → ${e.device}${e.ok ? "" : "（失败）"}`,
                   [e.user && `操作人：${e.user}`, e.error].filter(Boolean).join(" · ")],
   service_start: () => ["WoL 服务启动", ""],

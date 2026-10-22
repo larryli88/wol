@@ -91,12 +91,13 @@ function card(d) {
   el.querySelector(".dot").title = d.online ? "在线" : "离线";
   el.querySelector(".name").textContent = d.name;
   el.querySelector(".uptime").textContent = uptimeText(d);
-  el.querySelector(".meta").textContent = `${d.ip || "-"} · ${d.mac}`;
+  el.querySelector(".meta").textContent = [d.note, d.ip, d.mac].filter(Boolean).join(" · ");
   const wakeBtn = el.querySelector("button.on"), offBtn = el.querySelector("button.off");
+  if (d.wake === "ssh") wakeBtn.textContent = "开机";
   wakeBtn.onclick = () => wake(d, wakeBtn);
   if (d.can_shutdown) {
     offBtn.disabled = !d.online;
-    offBtn.title = d.online ? "" : "电脑不在线";
+    offBtn.title = d.online ? "" : "设备不在线";
     offBtn.onclick = () => shutdown(d, offBtn);
   } else {
     offBtn.remove();
@@ -111,7 +112,9 @@ function tick() {
 async function wake(d, btn) {
   btn.disabled = true;
   const r = await fetch(`/api/wake/${d.id}`, { method: "POST", headers: { "X-Requested-With": "wol" } });
-  msg.textContent = r.ok ? `已向 ${d.name} 发送唤醒包，开机后状态会在约半分钟内更新` : `发送失败：${r.status}`;
+  const body = await r.json().catch(() => ({}));
+  const what = d.wake === "ssh" ? "开机指令" : "唤醒包";
+  msg.textContent = r.ok ? `已向 ${d.name} 发送${what}，开机后状态会在约半分钟内更新` : `发送失败：${body.error || r.status}`;
   setTimeout(() => { btn.disabled = false; }, 3000);
 }
 

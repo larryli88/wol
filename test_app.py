@@ -267,12 +267,15 @@ class ShutdownTest(unittest.TestCase):
     def setUp(self):
         self.calls = []
         self.result = (True, "")
-        self.orig = app.ssh_shutdown
-        app.ssh_shutdown = lambda d: (self.calls.append(d["id"]), self.result)[1]
+        self.orig = app.ssh_run
+        app.ssh_run = lambda d, a: (self.calls.append((a, d["id"])), self.result)[1]
         devices = [
             {"id": "pc", "name": "PC", "mac": MAC, "ip": "127.0.0.1", "broadcast": "127.0.0.1",
              "port": 9, "shutdown": {"user": "u"}},
             {"id": "nas", "name": "NAS", "mac": MAC, "ip": "127.0.0.1", "broadcast": "127.0.0.1", "port": 9},
+            {"id": "vm", "name": "VM", "ip": "192.168.122.10", "note": "KVM",
+             "wake": {"user": "u", "host": "127.0.0.1", "command": "virsh start vm"},
+             "shutdown": {"user": "u", "host": "127.0.0.1", "command": "virsh shutdown vm"}},
         ]
         self.monitor = app.Monitor(devices, probe=lambda d: True)
         self.server = app.make_server({"server": {"port": 0}, "devices": devices}, FakeVerifier(), self.monitor)
@@ -280,7 +283,7 @@ class ShutdownTest(unittest.TestCase):
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
 
     def tearDown(self):
-        app.ssh_shutdown = self.orig
+        app.ssh_run = self.orig
         self.server.shutdown()
         self.server.server_close()
 
@@ -289,7 +292,7 @@ class ShutdownTest(unittest.TestCase):
 
     def test_shutdown_ok_is_logged(self):
         self.assertEqual(self.req("/api/shutdown/pc", "POST", self.AUTH), (200, b'{"ok": true}'))
-        self.assertEqual(self.calls, ["pc"])
+        self.assertEqual(self.calls, [("shutdown", "pc")])
         [ev] = self.monitor.recent_events()
         self.assertEqual((ev["kind"], ev["device"], ev["user"], ev["ok"]), ("shutdown", "PC", "me@example.com", True))
 
@@ -307,24 +310,42 @@ class ShutdownTest(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_snapshot_flags(self):
-        self.assertEqual([d["can_shutdown"] for d in self.monitor.snapshot()], [True, False])
+        snap = self.monitor.snapshot()
+        self.assertEqual([d["can_shutdown"] for d in snap], [True, False, True])
+        self.assertEqual([d["wake"] for d in snap], ["wol", "wol", "ssh"])
+        self.assertEqual((snap[2]["mac"], snap[2]["note"]), (None, "KVM"))
+
+    def test_vm_wake_runs_ssh_instead_of_magic_packet(self):
+        self.assertEqual(self.req("/api/wake/vm", "POST", self.AUTH), (200, b'{"ok": true}'))
+        self.assertEqual(self.calls, [("wake", "vm")])
+        [ev] = self.monitor.recent_events()
+        self.assertEqual((ev["kind"], ev["device"], ev["user"], ev["ok"]), ("wake", "VM", "me@example.com", True))
+        self.result = (False, "error: Domain is already active")
+        code, body = self.req("/api/wake/vm", "POST", self.AUTH)
+        self.assertEqual((code, json.loads(body)["error"]), (502, "error: Domain is already active"))
 
     def test_ssh_command_is_strict(self):
-        app.ssh_shutdown = self.orig
+        app.ssh_run = self.orig
         dev = {"ip": "192.0.2.1", "shutdown": {"user": "u", "key": "/k", "known_hosts": "/kh",
-                                               "port": 22, "command": "shutdown /s /t 0"}}
-        seen = {}
+                                               "port": 22, "command": "shutdown /s /t 0"},
+               "wake": {"user": "h", "host": "127.0.0.1", "key": "/k2", "known_hosts": "/kh",
+                        "port": 22, "command": "virsh start vm"}}
+        seen = []
         orig_run = app.subprocess.run
-        app.subprocess.run = lambda cmd, **kw: seen.setdefault("cmd", cmd) and type(
+        app.subprocess.run = lambda cmd, **kw: seen.append(cmd) or type(
             "R", (), {"returncode": 0, "stderr": ""})()
         try:
-            self.assertEqual(app.ssh_shutdown(dev), (True, ""))
+            self.assertEqual(app.ssh_run(dev, "shutdown"), (True, ""))
+            self.assertEqual(app.ssh_run(dev, "wake"), (True, ""))
         finally:
             app.subprocess.run = orig_run
-        cmd = " ".join(seen["cmd"])
+        cmd = " ".join(seen[0])
         for opt in ("BatchMode=yes", "StrictHostKeyChecking=yes", "UserKnownHostsFile=/kh", "IdentitiesOnly=yes"):
             self.assertIn(opt, cmd)
-        self.assertEqual(seen["cmd"][-2:], ["u@192.0.2.1", "shutdown /s /t 0"])
+        self.assertEqual(seen[0][-2:], ["u@192.0.2.1", "shutdown /s /t 0"])
+        # `host` overrides the device ip: the command runs on the hypervisor.
+        self.assertEqual(seen[1][-2:], ["h@127.0.0.1", "virsh start vm"])
+        self.assertIn("/k2", seen[1])
 
 
 class ConfigTest(unittest.TestCase):
@@ -336,6 +357,26 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(d["shutdown"], {"user": "your-windows-user", "key": "secrets/id_shutdown",
                                          "known_hosts": "secrets/known_hosts", "port": 22,
                                          "command": "shutdown /s /t 0"})
+        vm = cfg["devices"][1]
+        self.assertEqual((vm["id"], vm.get("mac"), vm["note"]), ("my-vm", None, "KVM 虚拟机"))
+        self.assertEqual(vm["wake"], {"host": "127.0.0.1", "user": "your-host-user", "key": "secrets/id_vm_start",
+                                      "known_hosts": "secrets/known_hosts", "port": 22,
+                                      "command": "virsh -c qemu:///system start myvm"})
+        self.assertEqual(vm["shutdown"]["command"], "virsh -c qemu:///system shutdown myvm")
+
+    def test_config_rules(self):
+        def load(body):
+            with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
+                f.write("[access]\nteam_domain='x'\naud='y'\n" + body)
+            return app.load_config(f.name)
+        with self.assertRaisesRegex(ValueError, "mac"):
+            load("[[devices]]\nname='a'\n")
+        with self.assertRaisesRegex(ValueError, "command"):
+            load("[[devices]]\nname='a'\n[devices.wake]\nuser='u'\nhost='h'\n")
+        with self.assertRaisesRegex(ValueError, "host"):
+            load("[[devices]]\nname='a'\n[devices.wake]\nuser='u'\ncommand='c'\n")
+        d = load("[[devices]]\nname='a'\n[devices.wake]\nuser='u'\nhost='h'\ncommand='c'\n")["devices"][0]
+        self.assertEqual(d["wake"]["key"], "secrets/id_wake")
 
 
 if __name__ == "__main__":

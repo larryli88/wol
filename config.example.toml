@@ -29,3 +29,27 @@ probe_ports = [445, 3389]
 [devices.shutdown]
 user = "your-windows-user"
 # command = "shutdown /s /t 0"
+
+# A virtual machine on this host. There is no magic packet for a VM, so both
+# buttons run virsh on the hypervisor over SSH (host = the hypervisor, here
+# the same machine this service runs on). One key per command, each pinned in
+# ~/.ssh/authorized_keys on the host:
+#   restrict,from="127.0.0.1",command="virsh -c qemu:///system start myvm" ssh-ed25519 AAAA...
+#   restrict,from="127.0.0.1",command="virsh -c qemu:///system shutdown myvm" ssh-ed25519 AAAA...
+[[devices]]
+name = "My VM"
+note = "KVM 虚拟机"
+ip = "192.168.122.10"
+probe_ports = [22]
+
+[devices.wake]
+host = "127.0.0.1"
+user = "your-host-user"
+key = "secrets/id_vm_start"
+command = "virsh -c qemu:///system start myvm"
+
+[devices.shutdown]
+host = "127.0.0.1"
+user = "your-host-user"
+key = "secrets/id_vm_shutdown"
+command = "virsh -c qemu:///system shutdown myvm"
