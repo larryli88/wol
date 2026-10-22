@@ -53,3 +53,10 @@ host = "127.0.0.1"
 user = "your-host-user"
 key = "secrets/id_vm_shutdown"
 command = "virsh -c qemu:///system shutdown myvm"
+
+# Optional: a "强制关机" button for when the VM hangs. Like pulling the plug.
+[devices.force_off]
+host = "127.0.0.1"
+user = "your-host-user"
+key = "secrets/id_vm_destroy"
+command = "virsh -c qemu:///system destroy myvm"

@@ -49,6 +49,8 @@ const LABELS = {
               [e.user && `操作人：${e.user}`, e.error].filter(Boolean).join(" · ")],
   shutdown: e => [`关机指令 → ${e.device}${e.ok ? "" : "（失败）"}`,
                   [e.user && `操作人：${e.user}`, e.error].filter(Boolean).join(" · ")],
+  force_off: e => [`强制关机 → ${e.device}${e.ok ? "" : "（失败）"}`,
+                   [e.user && `操作人：${e.user}`, e.error].filter(Boolean).join(" · ")],
   service_start: () => ["WoL 服务启动", ""],
 };
 

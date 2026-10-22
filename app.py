@@ -27,6 +27,8 @@ log = logging.getLogger("wol")
 MAC_RE = re.compile(r"^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$", re.I)
 STATIC = Path(__file__).parent
 PAGES = {"/": "index.html", "/logs": "logs.html"}
+# Optional per-device SSH actions and their default commands (None = required).
+SSH_ACTIONS = {"wake": None, "shutdown": "shutdown /s /t 0", "force_off": None}
 
 
 # --- Wake-on-LAN -----------------------------------------------------------
@@ -48,7 +50,7 @@ def send_wol(mac: str, broadcast: str, port: int = 9, repeat: int = 3) -> None:
 # --- Remote commands over SSH ---------------------------------------------
 
 def ssh_run(device: dict, action: str) -> tuple[bool, str]:
-    """Runs the device's `action` ("wake" or "shutdown") command over SSH.
+    """Runs the device's `action` (a key of SSH_ACTIONS) command over SSH.
 
     The target's authorized_keys should pin the key to the same command with
     restrict,command="..." so the key can't be used for anything else. The
@@ -267,7 +269,7 @@ class Monitor:
         with self.lock:
             return [{"id": d["id"], "name": d["name"], "mac": d.get("mac"), "ip": d.get("ip"),
                      "note": d.get("note"), "wake": "ssh" if "wake" in d else "wol",
-                     "can_shutdown": "shutdown" in d,
+                     "can_shutdown": "shutdown" in d, "can_force_off": "force_off" in d,
                      **{k: self.state[d["id"]][k] for k in ("online", "since", "since_exact", "checked")}}
                     for d in self.devices]
 
@@ -305,7 +307,7 @@ def load_config(path: str) -> dict:
         d.setdefault("broadcast", "255.255.255.255")
         d.setdefault("port", 9)
         d["id"] = slugify(d["name"])
-        for action, default_command in (("wake", None), ("shutdown", "shutdown /s /t 0")):
+        for action, default_command in SSH_ACTIONS.items():
             if action not in d:
                 continue
             sd = d[action]
@@ -389,7 +391,7 @@ class Handler(BaseHTTPRequestHandler):
         # Cross-site forms can't set custom headers, so this blocks CSRF.
         if self.headers.get("X-Requested-With") != "wol":
             return self._json(400, {"error": "missing X-Requested-With header"})
-        m = re.fullmatch(r"/api/(wake|shutdown)/([a-z0-9-]+)", self.path)
+        m = re.fullmatch(r"/api/(wake|shutdown|force_off)/([a-z0-9-]+)", self.path)
         device = next((d for d in self.devices if m and d["id"] == m.group(2)), None)
         if device is None:
             return self._json(404, {"error": "unknown device"})

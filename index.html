@@ -29,7 +29,8 @@
   button { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
            padding: 8px 16px; font: inherit; cursor: pointer; }
   button:disabled { opacity: .5; cursor: default; }
-  button.off { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  button.off, button.force { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  button.force { font-size: 13px; padding: 5px 12px; opacity: .8; }
   .actions { display: flex; flex-direction: column; gap: 8px; }
   #msg { color: var(--muted); font-size: 14px; min-height: 1.5em; }
 </style>
@@ -86,13 +87,14 @@ function card(d) {
   el.className = "card";
   el.innerHTML = `<span class="dot"></span>
     <div class="info"><div class="name"></div><div class="uptime"></div><div class="meta"></div></div>
-    <div class="actions"><button class="on">唤醒</button><button class="off">关机</button></div>`;
+    <div class="actions"><button class="on">唤醒</button><button class="off">关机</button><button class="force">强制关机</button></div>`;
   el.querySelector(".dot").classList.toggle("on", !!d.online);
   el.querySelector(".dot").title = d.online ? "在线" : "离线";
   el.querySelector(".name").textContent = d.name;
   el.querySelector(".uptime").textContent = uptimeText(d);
   el.querySelector(".meta").textContent = [d.note, d.ip, d.mac].filter(Boolean).join(" · ");
-  const wakeBtn = el.querySelector("button.on"), offBtn = el.querySelector("button.off");
+  const wakeBtn = el.querySelector("button.on"), offBtn = el.querySelector("button.off"),
+        forceBtn = el.querySelector("button.force");
   if (d.wake === "ssh") wakeBtn.textContent = "开机";
   wakeBtn.onclick = () => wake(d, wakeBtn);
   if (d.can_shutdown) {
@@ -102,6 +104,9 @@ function card(d) {
   } else {
     offBtn.remove();
   }
+  // Always enabled: it is for a VM that hangs, when the status may be wrong.
+  if (d.can_force_off) forceBtn.onclick = () => shutdown(d, forceBtn, true);
+  else forceBtn.remove();
   return el;
 }
 
@@ -118,12 +123,16 @@ async function wake(d, btn) {
   setTimeout(() => { btn.disabled = false; }, 3000);
 }
 
-async function shutdown(d, btn) {
-  if (!confirm(`确定要关闭 ${d.name} 吗？\n未保存的工作可能会丢失。`)) return;
+async function shutdown(d, btn, force = false) {
+  const q = force ? `确定要强制关闭 ${d.name} 吗？\n相当于直接断电，未保存的数据会丢失，只在它卡死时使用。`
+                  : `确定要关闭 ${d.name} 吗？\n未保存的工作可能会丢失。`;
+  if (!confirm(q)) return;
   btn.disabled = true;
-  const r = await fetch(`/api/shutdown/${d.id}`, { method: "POST", headers: { "X-Requested-With": "wol" } });
+  const r = await fetch(`/api/${force ? "force_off" : "shutdown"}/${d.id}`,
+                        { method: "POST", headers: { "X-Requested-With": "wol" } });
   const body = await r.json().catch(() => ({}));
-  msg.textContent = r.ok ? `已向 ${d.name} 发送关机指令` : `关机失败：${body.error || r.status}`;
+  const what = force ? "强制关机" : "关机";
+  msg.textContent = r.ok ? `已向 ${d.name} 发送${what}指令` : `${what}失败：${body.error || r.status}`;
   setTimeout(() => { btn.disabled = false; }, 3000);
 }
 

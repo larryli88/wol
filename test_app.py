@@ -275,7 +275,8 @@ class ShutdownTest(unittest.TestCase):
             {"id": "nas", "name": "NAS", "mac": MAC, "ip": "127.0.0.1", "broadcast": "127.0.0.1", "port": 9},
             {"id": "vm", "name": "VM", "ip": "192.168.122.10", "note": "KVM",
              "wake": {"user": "u", "host": "127.0.0.1", "command": "virsh start vm"},
-             "shutdown": {"user": "u", "host": "127.0.0.1", "command": "virsh shutdown vm"}},
+             "shutdown": {"user": "u", "host": "127.0.0.1", "command": "virsh shutdown vm"},
+             "force_off": {"user": "u", "host": "127.0.0.1", "command": "virsh destroy vm"}},
         ]
         self.monitor = app.Monitor(devices, probe=lambda d: True)
         self.server = app.make_server({"server": {"port": 0}, "devices": devices}, FakeVerifier(), self.monitor)
@@ -313,7 +314,16 @@ class ShutdownTest(unittest.TestCase):
         snap = self.monitor.snapshot()
         self.assertEqual([d["can_shutdown"] for d in snap], [True, False, True])
         self.assertEqual([d["wake"] for d in snap], ["wol", "wol", "ssh"])
+        self.assertEqual([d["can_force_off"] for d in snap], [False, False, True])
         self.assertEqual((snap[2]["mac"], snap[2]["note"]), (None, "KVM"))
+
+    def test_force_off(self):
+        self.assertEqual(self.req("/api/force_off/vm", "POST", self.AUTH), (200, b'{"ok": true}'))
+        self.assertEqual(self.calls, [("force_off", "vm")])
+        self.assertEqual(self.monitor.recent_events()[0]["kind"], "force_off")
+        self.assertEqual(self.req("/api/force_off/pc", "POST", self.AUTH)[0], 400)  # not configured
+        self.assertEqual(self.req("/api/force_off/vm", "POST", {"Cf-Access-Jwt-Assertion": "good"})[0], 400)
+        self.assertEqual(self.calls, [("force_off", "vm")])
 
     def test_vm_wake_runs_ssh_instead_of_magic_packet(self):
         self.assertEqual(self.req("/api/wake/vm", "POST", self.AUTH), (200, b'{"ok": true}'))
@@ -363,6 +373,8 @@ class ConfigTest(unittest.TestCase):
                                       "known_hosts": "secrets/known_hosts", "port": 22,
                                       "command": "virsh -c qemu:///system start myvm"})
         self.assertEqual(vm["shutdown"]["command"], "virsh -c qemu:///system shutdown myvm")
+        self.assertEqual((vm["force_off"]["command"], vm["force_off"]["key"]),
+                         ("virsh -c qemu:///system destroy myvm", "secrets/id_vm_destroy"))
 
     def test_config_rules(self):
         def load(body):
